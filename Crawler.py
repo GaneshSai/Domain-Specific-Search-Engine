@@ -31,16 +31,14 @@ depth = 0
 queue = []
 
 w2v_model_300 = KeyedVectors.load_word2vec_format("model300.bin", binary=True)
-print("Model 300 loaded")
 
-myconn = mysql.connector.connect(
-    host=DatabaseConfig.host,
-    user=DatabaseConfig.user,
-    passwd=DatabaseConfig.passwd,
-    database=DatabaseConfig.database,
+engine = create_engine(
+    "mysql+pymysql://{user}:{pw}@localhost/{db}".format(
+        user=DatabaseConfig.user, pw=DatabaseConfig.passwd, db=DatabaseConfig.database
+    )
 )
 
-cur = myconn.cursor(buffered=True)
+cur = engine.connect()
 f = open(FilesConfig.sub_urls, "a")
 
 
@@ -65,16 +63,15 @@ def inst(pid, url, IP):
 def getPID(url):
     x = url
     sql = "SELECT SNO FROM Information_Security1 WHERE URLs = %s"
-    cur.execute(sql, (x,))
+    myresult = cur.execute(sql, (x,))
     myconn.commit()
-    myresult = cur.fetchone()
+    myresult = myresult.fetchone()
     if myresult is None:
         myresult = 0
         result = myresult
         return result
     else:
         result = myresult[0]
-        print(result)
         return result
 
 
@@ -124,12 +121,10 @@ def get_url(url, leng):
 
 def crawling(url, PID):
     try:
-        print(url)
         sno_sql = "select SNO from Information_Security1 where URLs = '" + url + "'"
-        cur.execute(sno_sql)
-        result = cur.fetchone()
+        result = cur.execute(sno_sql)
+        result = result.fetchone()
         sno = result[0]
-        print(sno)
         sno = str(sno)
         f.write(url + "\n*************************\n")
         f.close
@@ -153,7 +148,9 @@ def crawling(url, PID):
         w2v_sim(url, text)
         n = 0
         for link in soup.find_all("a"):
-            sub_link = link.get("href")  # sub_link is the one by one sub links from link
+            sub_link = link.get(
+                "href"
+            )  # sub_link is the one by one sub links from link
             if sub_link is not None and "https" in sub_link:
                 for x in UnwatedUrlsConfig.web_sites:
                     x = UnwatedUrlsConfig.web_sites.encode("ascii")
@@ -182,7 +179,6 @@ def crawling(url, PID):
 
 
 def sorting_ip(PID, url):
-    print(PID)
     queue.remove(url)
     sql = (
         "select distinct substring_index(IPADD,'.',1) as a,"
@@ -194,12 +190,10 @@ def sorting_ip(PID, url):
         + (str(PID))
         + "' order by a+0,b+0,c+0,d+0;"
     )
-    print(sql)
     try:
-        cur.execute(sql)
+        sql_results = cur.execute(sql)
         myconn.commit()
-        sql_results = cur.fetchall()
-        print(sql_results)
+        sql_results = sql_results.fetchall()
         for element in sql_results:
             ip = element[4]
             result = getUrlsIPBased(ip)
@@ -221,9 +215,9 @@ def getUrlsIPBased(ip):
         + "' and Flag !=1;"
     )
     try:
-        cur.execute(sql)
+        sql_results = cur.execute(sql)
         myconn.commit()
-        sql_results = cur.fetchall()
+        sql_results = sql_results.fetchall()
         return sql_results
     except Exception as e:
         print(e)
@@ -240,13 +234,13 @@ def thread_initializer(queue):
     thrs = []
     # Checking free memory
     T_ind = mem.index("T")
-    mem_G = mem[T_ind + 14:-4]
+    mem_G = mem[T_ind + 14 : -4]
     S1_ind = mem_G.index(" ")
     mem_T = mem_G[0:S1_ind]
-    mem_G1 = mem_G[S1_ind + 8:]
+    mem_G1 = mem_G[S1_ind + 8 :]
     S2_ind = mem_G1.index(" ")
     mem_U = mem_G1[0:S2_ind]
-    mem_F = mem_G1[S2_ind + 8:]
+    mem_F = mem_G1[S2_ind + 8 :]
     mem_F = int(mem_F)
 
     for u1 in queue:
@@ -268,14 +262,13 @@ if __name__ == "__main__":
         "substring_index(IPADD,'.',-1) as d, IPADD,pid,urls  from Information_Security1 \
           where  flag<>1 order by a+0,b+0,c+0,d+0 limit 1;"
     )
-    cur.execute(sql)
+    result = cur.execute(sql)
     myconn.commit()
-    result = cur.fetchone()
+    result = result.fetchone()
     if result is not None:
         seed_url = result[6]
     else:
         seed_url = "https://en.wikipedia.org/wiki/Information_Security"
-        print(seed_url)
     queue.append(seed_url)  # Adding seed-url into queue
     upd(seed_url)
     thread_initializer(queue)
