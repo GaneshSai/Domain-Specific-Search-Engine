@@ -1,5 +1,4 @@
 import os
-import psutil
 import sys
 import urllib3
 from bs4 import BeautifulSoup
@@ -18,19 +17,21 @@ from config import FilesConfig
 from config import UnwatedUrlsConfig
 from config import PoliteConfig
 import re
-from w2vec import *
 import json
 import socket
 from tldextract import tldextract
 import ssl
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 index = 0
 mem = str(os.popen("free -t -m").readlines())
 visited = []
 depth = 0
 queue = []
+seed_url_PID = 0
 
-w2v_model_300 = KeyedVectors.load_word2vec_format("model300.bin", binary=True)
+# w2v_model_300 = KeyedVectors.load_word2vec_format("model300.bin", binary=True)
 
 engine = create_engine(
     "mysql+pymysql://{user}:{pw}@localhost/{db}".format(
@@ -38,6 +39,8 @@ engine = create_engine(
     )
 )
 
+Session = sessionmaker(bind=engine)
+session = Session()
 cur = engine.connect()
 f = open(FilesConfig.sub_urls, "a")
 
@@ -45,16 +48,20 @@ f = open(FilesConfig.sub_urls, "a")
 # Inserting into database
 def inst(pid, url, IP):
     check_url_exhist = (
-        "select URLs from Information_Security1 where URLs = '" + url + "'"
+        "select URLs from " + DatabaseConfig.Table_Name + " where URLs = '" + url + "'"
     )
-    cur.execute(check_url_exhist)
-    myconn.commit()
-    check_url_exhist_result = cur.rowcount
+    result = cur.execute(check_url_exhist)
+    session.commit()
+    check_url_exhist_result = result.rowcount
     if check_url_exhist_result < 1:
-        sql = "INSERT INTO Information_Security1\
+        sql = (
+            "INSERT INTO "
+            + DatabaseConfig.Table_Name
+            + "\
               (PID, URLs, IPADD) VALUES (%s, %s, %s)"
+        )
         cur.execute(sql, (pid, url, IP))
-        myconn.commit()
+        session.commit()
     else:
         pass
 
@@ -62,9 +69,9 @@ def inst(pid, url, IP):
 # Getting PID for URLs
 def getPID(url):
     x = url
-    sql = "SELECT SNO FROM Information_Security1 WHERE URLs = %s"
+    sql = "SELECT SNO FROM " + DatabaseConfig.Table_Name + " WHERE URLs = %s"
     myresult = cur.execute(sql, (x,))
-    myconn.commit()
+    session.commit()
     myresult = myresult.fetchone()
     if myresult is None:
         myresult = 0
@@ -80,30 +87,55 @@ def upd(IP_Query_result):
     if IP_Query_result is not None:
         flag_update_sql = ""
         try:
-            flag_update_sql = """UPDATE Information_Security1 SET Flag = '1' where
+            flag_update_sql = (
+                """UPDATE '"""
+                + DatabaseConfig.Table_Name
+                + """' SET Flag = '1' where
                            URLs = '{IP_Query_result}' """.format(
-                IP_Query_result=IP_Query_result.decode()
+                    IP_Query_result=IP_Query_result.decode()
+                )
             )
         except Exception as e:
-            flag_update_sql = """UPDATE Information_Security1 SET Flag = '1' where
+            flag_update_sql = (
+                """UPDATE """
+                + DatabaseConfig.Table_Name
+                + """ SET Flag = '1' where
                            URLs = '{IP_Query_result}' """.format(
-                IP_Query_result=IP_Query_result
+                    IP_Query_result=IP_Query_result
+                )
             )
         try:
             pass
             cur.execute(flag_update_sql)
-            myconn.commit()
+            session.commit()
         except Exception as e:
             print(e)
+            print("$$$$$$$$$$$$$$")
             # pass
+
+
+def upd_url_type(url):
+    sql = (
+        "UPDATE "
+        + DatabaseConfig.Table_Name
+        + " set Url_type = '0' where Urls = '"
+        + url
+        + "';"
+    )
+    cur.execute(sql)
+    session.commit()
 
 
 # Process for extraction of data and URLs
 def get_url(url, leng):
+    global seed_url_PID
     PID = getPID(url)
     if PID == 0:
         ip = IP_add(url)
-        inst(-1, url, ip)
+        PID = seed_url_PID - 1
+        seed_url_PID = seed_url_PID - 1
+        inst(PID, url, ip)
+        upd_url_type(url)
         PID = getPID(url)
     else:
         PID = getPID(url)
@@ -119,9 +151,16 @@ def get_url(url, leng):
         pass
 
 
-def crawling(url, PID):
+def crawling(url, PID):  # crawling plain text, and sub urls
+    print(url)
     try:
-        sno_sql = "select SNO from Information_Security1 where URLs = '" + url + "'"
+        sno_sql = (
+            "select SNO from "
+            + DatabaseConfig.Table_Name
+            + " where URLs = '"
+            + url
+            + "'"
+        )
         result = cur.execute(sno_sql)
         result = result.fetchone()
         sno = result[0]
@@ -134,18 +173,21 @@ def crawling(url, PID):
         for script in soup(["script", "style"]):
             script.extract()
         text = soup.get_text()
+        # print(text)
         hash_x = hash(text)
-        hash_update_sql = "UPDATE Information_Security1 SET H1 = %s  where URLs = %s"
+        hash_update_sql = (
+            "UPDATE " + DatabaseConfig.Table_Name + " SET H1 = %s  where URLs = %s"
+        )
         val = ((hash_x), str(url))
         cur.execute(hash_update_sql, val)
-        myconn.commit()
+        session.commit()
         fn = open(FilesConfig.text_storing + sno + ".txt", "w")
-        fn.write(url)
+        fn.write(url + "\n")
         fn.write(text)
         f1 = open(FilesConfig.hash_value + sno + ".txt", "w")
         f1.write("%d" % hash_x)
         f1.close()
-        w2v_sim(url, text)
+        # w2v_sim(url, text)
         n = 0
         for link in soup.find_all("a"):
             sub_link = link.get(
@@ -178,21 +220,23 @@ def crawling(url, PID):
     sorting_ip(PID, url)
 
 
-def sorting_ip(PID, url):
+def sorting_ip(PID, url):  # Sorting IP in form of ascending order
     queue.remove(url)
     sql = (
         "select distinct substring_index(IPADD,'.',1) as a,"
         "substring_index(substring_index(IPADD,'.',2),'.',-1) as b,"
         "substring_index(substring_index(substring_index\
           (IPADD,'.',3),'.',-1),'.',-1) as c,"
-        "substring_index(IPADD,'.',-1) as d, IPADD  from Information_Security1\
+        "substring_index(IPADD,'.',-1) as d, IPADD  from "
+        + DatabaseConfig.Table_Name
+        + "\
           where PID = '"
         + (str(PID))
-        + "' order by a+0,b+0,c+0,d+0;"
+        + "' and Url_type = 0 order by a+0,b+0,c+0,d+0;"
     )
     try:
         sql_results = cur.execute(sql)
-        myconn.commit()
+        session.commit()
         sql_results = sql_results.fetchall()
         for element in sql_results:
             ip = element[4]
@@ -204,23 +248,27 @@ def sorting_ip(PID, url):
 
     except Exception as e:
         print(e)
+        print("############")
     thread_initializer(queue)
 
 
-def getUrlsIPBased(ip):
+def getUrlsIPBased(ip):  # fetching all the IP address already in DB
     sql = (
-        "select distinct URLs,IPADD  from Information_Security1 \
+        "select distinct URLs,IPADD  from "
+        + DatabaseConfig.Table_Name
+        + " \
     where IPADD='"
         + ip
         + "' and Flag !=1;"
     )
     try:
         sql_results = cur.execute(sql)
-        myconn.commit()
+        session.commit()
         sql_results = sql_results.fetchall()
         return sql_results
     except Exception as e:
         print(e)
+        print("***********")
 
 
 def IP_add(l):  # extraction of IP address
@@ -231,6 +279,7 @@ def IP_add(l):  # extraction of IP address
 
 
 def thread_initializer(queue):
+    # print("thread_initializer")
     thrs = []
     # Checking free memory
     T_ind = mem.index("T")
@@ -254,21 +303,31 @@ def thread_initializer(queue):
 
 if __name__ == "__main__":
 
+    # Checking if there is already some URL's in DB.
     sql = (
         "select distinct substring_index(IPADD,'.',1) as a,\
           substring_index(substring_index(IPADD,'.',2),'.',-1) as b,"
         "substring_index(substring_index\
           (substring_index(IPADD,'.',3),'.',-1),'.',-1) as c,"
-        "substring_index(IPADD,'.',-1) as d, IPADD,pid,urls  from Information_Security1 \
-          where  flag<>1 order by a+0,b+0,c+0,d+0 limit 1;"
+        "substring_index(IPADD,'.',-1) as d, IPADD,pid,urls  from "
+        + DatabaseConfig.Table_Name
+        + " \
+          where  flag<>1 and Url_type = 0 order by a+0,b+0,c+0,d+0 limit 1;"
     )
     result = cur.execute(sql)
-    myconn.commit()
+    session.commit()
     result = result.fetchone()
-    if result is not None:
+    if (
+        result is not None
+    ):  # if there are URL's in DB, add those to the queue and start thread.
         seed_url = result[6]
-    else:
-        seed_url = "https://en.wikipedia.org/wiki/Information_Security"
-    queue.append(seed_url)  # Adding seed-url into queue
-    upd(seed_url)
-    thread_initializer(queue)
+        queue.append(seed_url)
+        thread_initializer(queue)
+    else:  # if no URL's in DB, taking from the set of seed URL's
+        with open("wiki_urls.txt", "r") as seed_url_file:
+            content = seed_url_file.read()
+            content = content.split("\n")
+            for url in content:
+                seed_url = url
+                queue.append(seed_url)  # Adding seed-url into queue
+                thread_initializer(queue)
